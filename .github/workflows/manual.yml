@@ -1,0 +1,146 @@
+# This is a basic workflow that is manually triggered
+
+name: dev auto analysis
+
+# Controls when the action will run. Workflow runs when manually triggered using the UI
+# or API.
+on:
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # auto verify
+    get_version:
+      name: get the latest version
+      # The type of runner that the job will run on
+      runs-on: ubuntu-20.04
+      outputs:
+        LATEST_VERSION: ${{ steps.checkVersion.outputs.LATEST_VERSION }}
+      steps:
+        - uses: actions/checkout@v3
+        - uses: actions/setup-python@v3
+          with:
+            python-version: '3.8' # Version range or exact version of a Python version to use, using SemVer's version range syntax
+            architecture: 'x64' # optional x64 or x86. Defaults to x64 if not specified
+        - name: install dependencies
+          run: |
+            sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install innoextract -y
+            python3 -m pip install loguru
+
+        - name: Check Latest Version (use win-x64)
+          id: checkVersion
+          run: | 
+            python3 auto-analysis/check_version.py
+            output="$(cat auto-analysis/win/x64/LATEST_VERSION)"
+            echo "$output"
+            echo "::set-output name=LATEST_VERSION::$output"
+
+    create_release:
+      needs: get_version
+      runs-on: ubuntu-20.04
+      steps:
+        - run: echo '${{ needs.get_version.outputs.LATEST_VERSION }}'
+        
+        - name: Create Runner Release
+          uses: actions/create-release@v1
+          id: createRelease
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          with:
+            tag_name: '${{ needs.get_version.outputs.LATEST_VERSION }}'
+            release_name: '${{ needs.get_version.outputs.LATEST_VERSION }}'
+            prerelease: false
+
+          
+    patch_file:
+      needs: [get_version, create_release]
+      runs-on: ubuntu-20.04
+      if: needs.get_version.outputs.RELEASE_VERSION != needs.get_version.outputs.LATEST_VERSION
+
+      steps:
+        - uses: actions/checkout@v3
+        - uses: actions/setup-python@v3
+          with:
+            python-version: '3.8'
+            architecture: 'x64'
+        - name: install dependencies
+          run: |
+            sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install innoextract zip -y
+            python3 -m pip install r2pipe loguru
+        - name: build radare2
+          shell: bash
+          run: |
+            git clone https://github.com/radareorg/radare2
+            radare2/sys/install.sh
+        - name: patch version
+          run: | 
+            python3 auto-analysis/patch.py
+            
+            zip -rjq auto-analysis/win/x64/build/auto-analysis.zip auto-analysis/win/x64/build/*
+            zip -rjq auto-analysis/win/x86/build/auto-analysis.zip auto-analysis/win/x86/build/*
+            zip -rjq auto-analysis/linux/x64/build/auto-analysis.zip auto-analysis/linux/x64/build/*
+            
+        - name: Check release version
+          id: checkReleaseVersion
+          uses: actions/github-script@v3.1.0
+          with:
+            github-token: ${{secrets.GITHUB_TOKEN}}
+            script: |
+              try {
+                const releaseVersion = '${{ needs.get_version.outputs.LATEST_VERSION }}'
+                const releaseResponse = await github.repos.getReleaseByTag({
+                  owner: 'Mas0nShi',
+                  repo: 'anti-electron-asar-encrypt-demo',
+                  tag: releaseVersion
+                })
+                const {
+                  data: { id: releaseId, html_url: htmlUrl, upload_url: uploadUrl }
+                } = releaseResponse;
+                core.setOutput('id', releaseId);
+                core.setOutput('html_url', htmlUrl);
+                core.setOutput('upload_url', uploadUrl);
+                core.setOutput('version', releaseVersion);
+              } catch (e) {
+                core.setFailed(e.message);
+              }
+              
+        - name: Upload win-x64
+          uses: actions/upload-release-asset@v1.0.2
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          with:
+            upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
+            asset_path: '${{ github.workspace }}/auto-analysis/win/x64/build/auto-analysis.zip'
+            asset_name: 'auto-analysis-${{ needs.get_version.outputs.LATEST_VERSION }}-win-x64.zip'
+            asset_content_type: application/zip
+  
+        - name: Upload win-x86
+          uses: actions/upload-release-asset@v1.0.2
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          with:
+            upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
+            asset_path: '${{ github.workspace }}/auto-analysis/win/x86/build/auto-analysis.zip'
+            asset_name: 'auto-analysis-${{ needs.get_version.outputs.LATEST_VERSION }}-win-x86.zip'
+            asset_content_type: application/zip
+
+        - name: Upload linux-x64
+          uses: actions/upload-release-asset@v1.0.2
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          with:
+            upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
+            asset_path: '${{ github.workspace }}/auto-analysis/linux/x64/build/auto-analysis.zip'
+            asset_name: 'auto-analysis-${{ needs.get_version.outputs.LATEST_VERSION }}-linux-x64.zip'
+            asset_content_type: application/zip
+
+        - name: verify scripts
+          run: |
+            python3 -m pip install -r auto-analysis/win/x64/build/requirements.txt
+            
+            python3 auto-analysis/win/x64/build/decrypt.py auto-analysis/win/x64/app/resources/app.asar auto-analysis/win/x64
+            echo "win x64 test completed"
+            python3 auto-analysis/win/x86/build/decrypt.py auto-analysis/win/x86/app/resources/app.asar auto-analysis/win/x86
+            echo "win x86 test completed"
+            python3 auto-analysis/linux/x64/build/decrypt.py auto-analysis/linux/x64/bin/Typora-linux-x64/resources/app.asar auto-analysis/linux/x64
+            echo "linux x64 test completed"
